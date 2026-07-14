@@ -1,0 +1,56 @@
+{
+  "Monday": [
+    {
+      "course": "EED",
+      "time": "8:00 AM - 10:00 AM"
+    },
+    {
+      "course": "AIT 323",
+      "time": "12:00 PM - 2:00 PM"
+    },
+    {
+      "course": "AIT 321 Practical",
+      "time": "2:00 PM - 4:00 PM"
+    }
+  ],
+  "Tuesday": [
+    {
+      "course": "AIT 324",
+      "time": "8:00 AM - 10:00 AM"
+    },
+    {
+      "course": "AIT 325",
+      "time": "10:00 AM - 12:00 PM"
+    },
+    {
+      "course": "AIT 326",
+      "time": "12:00 PM - 2:00 PM"
+    }
+  ],
+  "Wednesday": [
+    {
+      "course": "AIT 327",
+      "time": "8:00 AM - 10:00 AM"
+    },
+    {
+      "course": "AIT 321",
+      "time": "10:00 AM - 12:00 PM"
+    },
+    {
+      "course": "GNS 302",
+      "time": "12:00 PM - 2:00 PM"
+    }
+  ],
+  "Thursday": [
+    {
+      "course": "Mandatory Skills Qualification",
+      "time": "As Scheduled"
+    }
+  ],
+  "Friday": [
+    {
+      "course": "AIT 324 Practical",
+      "time": "10:00 AM - 12:00 PM"
+    }
+  ]
+}
