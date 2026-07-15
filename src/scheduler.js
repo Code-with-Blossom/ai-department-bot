@@ -16,27 +16,17 @@ const DAY_MAP = {
   sunday: 0
 };
 
-/**
- * Loads the weekly timetable from the SQLite database
- * @returns {Promise<object>} Grouped timetable object
- */
 async function loadTimetable() {
   try {
-    const rows = await db.dbQueryAll('SELECT day, course, time FROM timetable');
+    const rawTimetable = await db.getTimetable();
     const timetable = {};
-    
-    rows.forEach((row) => {
-      // Normalize day name capitalization (e.g. 'Monday')
-      const day = row.day.charAt(0).toUpperCase() + row.day.slice(1).toLowerCase();
-      if (!timetable[day]) {
-        timetable[day] = [];
-      }
-      timetable[day].push({ course: row.course, time: row.time });
-    });
-    
+    for (const [dayName, classes] of Object.entries(rawTimetable)) {
+      const day = dayName.charAt(0).toUpperCase() + dayName.slice(1).toLowerCase();
+      timetable[day] = classes;
+    }
     return timetable;
   } catch (error) {
-    logger.error('Error loading timetable from SQLite:', error);
+    logger.error('Error loading timetable from JSON database:', error);
     return {};
   }
 }

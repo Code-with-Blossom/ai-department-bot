@@ -1,0 +1,11 @@
+{
+  "settings": {
+    "is_reminders_paused": "false",
+    "thursday_class_time": "11:00 AM - 1:00 PM"
+  },
+  "users": [],
+  "notes": [],
+  "exams": [],
+  "announcements": [],
+  "schedule_changes": []
+}

@@ -276,12 +276,9 @@ async function handleAnnouncement(sock, remoteJid, senderJid, args, msg) {
     return;
   }
 
-  // Save announcement to announcements table in SQLite
+  // Save announcement to JSON database
   try {
-    await db.dbQueryRun(
-      'INSERT INTO announcements (sender_jid, content) VALUES (?, ?)',
-      [normalizeJid(senderJid), announcementText]
-    );
+    await db.addAnnouncement(normalizeJid(senderJid), announcementText);
   } catch (err) {
     logger.error('Failed to log announcement to database:', err);
   }
@@ -431,14 +428,11 @@ async function handleChange(sock, remoteJid, args, msg) {
   const success = await config.setReminderTime('thursday', timeRange);
 
   if (success) {
-    // Log schedule change to SQLite database schedule_changes table
+    // Log schedule change to JSON database
     try {
-      await db.dbQueryRun(
-        'INSERT INTO schedule_changes (day, course, original_time, new_time) VALUES (?, ?, ?, ?)',
-        ['Thursday', 'Mandatory Skills Qualification', 'As Scheduled', timeRange]
-      );
+      await db.addScheduleChange('Thursday', 'Mandatory Skills Qualification', 'As Scheduled', timeRange);
     } catch (err) {
-      logger.error('Failed to log schedule change to SQLite:', err);
+      logger.error('Failed to log schedule change to database:', err);
     }
 
     // Reschedule in-memory jobs

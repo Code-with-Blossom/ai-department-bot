@@ -25,10 +25,7 @@ module.exports = {
       const [course, title, url] = parts;
       
       try {
-        await db.dbQueryRun(
-          'INSERT INTO notes (course, title, url) VALUES (?, ?, ?)',
-          [course, title, url]
-        );
+        await db.addNote(course, title, url);
         await sock.sendMessage(remoteJid, {
           text: `✅ *Lecture Note Added:* Successfully registered note for *${course}* - *${title}* in database.`
         }, { quoted: msg });
@@ -44,7 +41,7 @@ module.exports = {
     
     // Query notes list
     try {
-      const rows = await db.dbQueryAll('SELECT course, title, url FROM notes ORDER BY id DESC');
+      const rows = await db.getNotes();
       
       if (rows.length === 0) {
         await sock.sendMessage(remoteJid, {

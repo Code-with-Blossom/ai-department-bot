@@ -181,10 +181,10 @@ function startHealthCheckServer() {
  */
 async function start() {
   try {
-    // 1. Initialize SQLite Database
+    // 1. Initialize JSON Database
     await database.init();
 
-    // 2. Load settings from database
+    // 2. Load settings from JSON database
     await config.load();
 
     // 3. Bind HTTP server (crucial for Cloud hosts)

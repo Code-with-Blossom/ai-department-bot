@@ -25,10 +25,7 @@ module.exports = {
       const [course, date, time, venue] = parts;
       
       try {
-        await db.dbQueryRun(
-          'INSERT INTO exams (course, date, time, venue) VALUES (?, ?, ?, ?)',
-          [course, date, time, venue]
-        );
+        await db.addExam(course, date, time, venue);
         await sock.sendMessage(remoteJid, {
           text: `✅ *Exam Scheduled:* Successfully registered exam details for *${course}* on *${date}* at *${venue}* in database.`
         }, { quoted: msg });
@@ -44,7 +41,7 @@ module.exports = {
     
     // Query exams list
     try {
-      const rows = await db.dbQueryAll('SELECT course, date, time, venue FROM exams ORDER BY date ASC');
+      const rows = await db.getExams();
       
       if (rows.length === 0) {
         await sock.sendMessage(remoteJid, {

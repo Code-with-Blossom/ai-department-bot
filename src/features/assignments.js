@@ -27,10 +27,7 @@ module.exports = {
       const [course, title, deadline] = parts;
       
       try {
-        await db.dbQueryRun(
-          'INSERT INTO assignments (course, title, deadline) VALUES (?, ?, ?)',
-          [course, title, deadline]
-        );
+        await db.addAssignment(course, title, deadline);
         await sock.sendMessage(remoteJid, {
           text: `✅ *Assignment Added:* Successfully registered deadline for *${course}* - *${title}* on *${deadline}* in database.`
         }, { quoted: msg });
@@ -46,7 +43,7 @@ module.exports = {
     
     // Query assignments list
     try {
-      const rows = await db.dbQueryAll('SELECT course, title, deadline FROM assignments ORDER BY id DESC');
+      const rows = await db.getAssignments();
       
       if (rows.length === 0) {
         await sock.sendMessage(remoteJid, {

@@ -25,15 +25,10 @@ async function loadConfigFromDb() {
 
   try {
     // Query all settings key-values
-    const settingsRows = await db.dbQueryAll('SELECT key, value FROM settings');
-    const dbSettings = {};
-    settingsRows.forEach(row => {
-      dbSettings[row.key] = row.value;
-    });
+    const dbSettings = await db.getSettings();
 
-    // Query admin users from users table
-    const adminRows = await db.dbQueryAll("SELECT jid FROM users WHERE role = 'admin'");
-    const dbAdminJids = adminRows.map(r => r.jid);
+    // Query admin users
+    const dbAdminJids = await db.getAdmins();
 
     // Merge environmental admins with database-defined admins
     const combinedAdminJids = Array.from(new Set([
@@ -49,9 +44,9 @@ async function loadConfigFromDb() {
       isRemindersPaused: dbSettings['is_reminders_paused'] === 'true'
     };
 
-    logger.info('Successfully loaded configuration from SQLite database.');
+    logger.info('Successfully loaded configuration from JSON database.');
   } catch (error) {
-    logger.error('Failed to load configuration from SQLite database, falling back to environment defaults.', error);
+    logger.error('Failed to load configuration from JSON database, falling back to environment defaults.', error);
     loadedConfig = { ...defaultConfig };
   }
 
@@ -59,17 +54,14 @@ async function loadConfigFromDb() {
 }
 
 /**
- * Saves a setting key-value pair asynchronously to settings table and updates the in-memory cache.
+ * Saves a setting key-value pair asynchronously to settings config and updates the in-memory cache.
  */
 async function saveSetting(key, value) {
   try {
-    await db.dbQueryRun(
-      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-      [key, value.toString()]
-    );
+    await db.saveSetting(key, value);
     return true;
   } catch (error) {
-    logger.error(`Failed to save settings key "${key}" to SQLite:`, error);
+    logger.error(`Failed to save settings key "${key}" to JSON:`, error);
     return false;
   }
 }

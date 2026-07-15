@@ -1,219 +1,307 @@
-const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
 
 const DATA_DIR = path.join(__dirname, '../data');
-const DB_PATH = path.join(DATA_DIR, 'ai_department.db');
+const TIMETABLE_PATH = path.join(DATA_DIR, 'timetable.json');
+const ASSIGNMENTS_PATH = path.join(DATA_DIR, 'assignments.json');
+const ATTENDANCE_PATH = path.join(DATA_DIR, 'attendance.json');
+const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 
 // Ensure data folder exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-// Establish DB connection
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) {
-    logger.error('Failed to connect to SQLite database:', err);
-  } else {
-    logger.info(`Connected to SQLite database at: ${DB_PATH}`);
+/**
+ * Writes data atomically to a JSON file to prevent corruption.
+ */
+function writeJsonAtomic(filePath, data) {
+  const tempPath = filePath + '.tmp';
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tempPath, filePath);
+  } catch (err) {
+    logger.error(`Failed to write JSON atomically to ${filePath}:`, err);
+    if (fs.existsSync(tempPath)) {
+      try { fs.unlinkSync(tempPath); } catch (_) {}
+    }
+    throw err;
   }
-});
-
-/**
- * Executes a run query (INSERT/UPDATE/DELETE) wrapped in a Promise
- */
-function dbQueryRun(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) {
-        logger.error(`Database Error on SQL Run: "${sql}"`, err);
-        reject(err);
-      } else {
-        resolve({ lastID: this.lastID, changes: this.changes });
-      }
-    });
-  });
 }
 
 /**
- * Executes a single-row SELECT query wrapped in a Promise
+ * Reads and parses a JSON file, returning a default value on error/absence.
  */
-function dbQueryGet(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) {
-        logger.error(`Database Error on SQL Get: "${sql}"`, err);
-        reject(err);
-      } else {
-        resolve(row);
-      }
-    });
-  });
+function readJson(filePath, defaultValue = {}) {
+  try {
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf8');
+      return JSON.parse(content);
+    }
+  } catch (err) {
+    logger.error(`Error reading/parsing JSON file ${filePath}:`, err);
+  }
+  return defaultValue;
 }
 
 /**
- * Executes a multi-row SELECT query wrapped in a Promise
- */
-function dbQueryAll(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) {
-        logger.error(`Database Error on SQL All: "${sql}"`, err);
-        reject(err);
-      } else {
-        resolve(rows);
-      }
-    });
-  });
-}
-
-/**
- * Auto-creates all required tables and seeds timetable if empty
+ * Initializes the JSON database files.
  */
 async function init() {
-  logger.info('Initializing SQLite database schema...');
+  logger.info('Initializing JSON database system...');
 
-  // 1. Users table
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      jid TEXT UNIQUE NOT NULL,
-      name TEXT,
-      role TEXT NOT NULL DEFAULT 'student',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // 2. Notes table
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      course TEXT NOT NULL,
-      title TEXT NOT NULL,
-      url TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // 3. Assignments table
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS assignments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      course TEXT NOT NULL,
-      title TEXT NOT NULL,
-      deadline TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // 4. Exams table
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS exams (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      course TEXT NOT NULL,
-      date TEXT NOT NULL,
-      time TEXT NOT NULL,
-      venue TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // 5. Attendance table
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS attendance (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_jid TEXT NOT NULL,
-      course TEXT NOT NULL,
-      date TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'present',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // 6. Announcements table
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS announcements (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sender_jid TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // 7. Schedule Changes table
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS schedule_changes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      day TEXT NOT NULL,
-      course TEXT NOT NULL,
-      original_time TEXT NOT NULL,
-      new_time TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // 8. Timetable table (Centralized timetable database)
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS timetable (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      day TEXT NOT NULL,
-      course TEXT NOT NULL,
-      time TEXT NOT NULL
-    );
-  `);
-
-  // 9. Key-value Settings table
-  await dbQueryRun(`
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    );
-  `);
-
-  logger.info('Database tables successfully checked/created.');
-
-  // 10. Automatically seed timetable table from timetable.json if empty
-  const timetableCount = await dbQueryGet('SELECT COUNT(*) as count FROM timetable');
-  if (timetableCount.count === 0) {
-    const timetableJsonPath = path.join(__dirname, '../timetable.json');
-    if (fs.existsSync(timetableJsonPath)) {
+  // 1. Initialize timetable.json
+  if (!fs.existsSync(TIMETABLE_PATH)) {
+    const rootTimetablePath = path.join(__dirname, '../timetable.json');
+    if (fs.existsSync(rootTimetablePath)) {
       try {
-        logger.info('Timetable table is empty. Seeding from timetable.json...');
-        const fileContent = fs.readFileSync(timetableJsonPath, 'utf8');
-        const timetableData = JSON.parse(fileContent);
-
-        for (const [day, classes] of Object.entries(timetableData)) {
-          for (const item of classes) {
-            await dbQueryRun(
-              'INSERT INTO timetable (day, course, time) VALUES (?, ?, ?)',
-              [day, item.course, item.time]
-            );
-          }
-        }
-        logger.info('Timetable table seeded successfully.');
+        logger.info('Seeding data/timetable.json from root timetable.json...');
+        fs.copyFileSync(rootTimetablePath, TIMETABLE_PATH);
       } catch (err) {
-        logger.error('Failed to seed timetable table from JSON file:', err);
+        logger.error('Failed to copy root timetable.json to data/timetable.json:', err);
+        writeJsonAtomic(TIMETABLE_PATH, {});
       }
     } else {
-      logger.warn('timetable.json not found. Could not seed database timetable.');
+      logger.warn('Root timetable.json not found. Initializing empty timetable.');
+      writeJsonAtomic(TIMETABLE_PATH, {});
     }
   }
 
-  // 11. Automatically seed settings table with initial defaults if empty
-  const settingsCount = await dbQueryGet('SELECT COUNT(*) as count FROM settings');
-  if (settingsCount.count === 0) {
-    logger.info('Settings table is empty. Seeding defaults...');
-    await dbQueryRun('INSERT INTO settings (key, value) VALUES (?, ?)', ['is_reminders_paused', 'false']);
-    await dbQueryRun('INSERT INTO settings (key, value) VALUES (?, ?)', ['thursday_class_time', process.env.THURSDAY_CLASS_TIME || '11:00 AM - 1:00 PM']);
-    logger.info('Settings defaults seeded successfully.');
+  // 2. Initialize assignments.json
+  if (!fs.existsSync(ASSIGNMENTS_PATH)) {
+    writeJsonAtomic(ASSIGNMENTS_PATH, []);
   }
+
+  // 3. Initialize attendance.json
+  if (!fs.existsSync(ATTENDANCE_PATH)) {
+    writeJsonAtomic(ATTENDANCE_PATH, []);
+  }
+
+  // 4. Initialize config.json
+  if (!fs.existsSync(CONFIG_PATH)) {
+    const initialConfig = {
+      settings: {
+        is_reminders_paused: 'false',
+        thursday_class_time: process.env.THURSDAY_CLASS_TIME || '11:00 AM - 1:00 PM'
+      },
+      users: [],
+      notes: [],
+      exams: [],
+      announcements: [],
+      schedule_changes: []
+    };
+    writeJsonAtomic(CONFIG_PATH, initialConfig);
+  }
+
+  logger.info('JSON database files successfully checked/created.');
+}
+
+/**
+ * Returns the weekly timetable object.
+ */
+async function getTimetable() {
+  return readJson(TIMETABLE_PATH, {});
+}
+
+/**
+ * Returns all assignments, ordered by ID descending (newest first).
+ */
+async function getAssignments() {
+  const list = readJson(ASSIGNMENTS_PATH, []);
+  return [...list].sort((a, b) => b.id - a.id);
+}
+
+/**
+ * Adds a new assignment.
+ */
+async function addAssignment(course, title, deadline) {
+  const list = readJson(ASSIGNMENTS_PATH, []);
+  const nextId = list.reduce((max, item) => Math.max(max, item.id || 0), 0) + 1;
+  const newItem = {
+    id: nextId,
+    course,
+    title,
+    deadline,
+    created_at: new Date().toISOString()
+  };
+  list.push(newItem);
+  writeJsonAtomic(ASSIGNMENTS_PATH, list);
+  return newItem;
+}
+
+/**
+ * Adds an attendance record.
+ */
+async function addAttendance(userJid, course, date, status = 'present') {
+  const list = readJson(ATTENDANCE_PATH, []);
+  const nextId = list.reduce((max, item) => Math.max(max, item.id || 0), 0) + 1;
+  const newItem = {
+    id: nextId,
+    user_jid: userJid,
+    course,
+    date,
+    status,
+    created_at: new Date().toISOString()
+  };
+  list.push(newItem);
+  writeJsonAtomic(ATTENDANCE_PATH, list);
+  return newItem;
+}
+
+/**
+ * Returns the settings map.
+ */
+async function getSettings() {
+  const configData = readJson(CONFIG_PATH, {});
+  return configData.settings || {};
+}
+
+/**
+ * Saves a setting key-value pair.
+ */
+async function saveSetting(key, value) {
+  const configData = readJson(CONFIG_PATH, {});
+  if (!configData.settings) {
+    configData.settings = {};
+  }
+  configData.settings[key] = value.toString();
+  writeJsonAtomic(CONFIG_PATH, configData);
+  return true;
+}
+
+/**
+ * Returns list of admin JIDs.
+ */
+async function getAdmins() {
+  const configData = readJson(CONFIG_PATH, {});
+  const users = configData.users || [];
+  return users.filter(u => u.role === 'admin').map(u => u.jid);
+}
+
+/**
+ * Returns all notes, ordered by ID descending (newest first).
+ */
+async function getNotes() {
+  const configData = readJson(CONFIG_PATH, {});
+  const list = configData.notes || [];
+  return [...list].sort((a, b) => b.id - a.id);
+}
+
+/**
+ * Adds a new shared note.
+ */
+async function addNote(course, title, url) {
+  const configData = readJson(CONFIG_PATH, {});
+  if (!configData.notes) {
+    configData.notes = [];
+  }
+  const nextId = configData.notes.reduce((max, item) => Math.max(max, item.id || 0), 0) + 1;
+  const newItem = {
+    id: nextId,
+    course,
+    title,
+    url,
+    created_at: new Date().toISOString()
+  };
+  configData.notes.push(newItem);
+  writeJsonAtomic(CONFIG_PATH, configData);
+  return newItem;
+}
+
+/**
+ * Returns all exams, sorted by date ascending.
+ */
+async function getExams() {
+  const configData = readJson(CONFIG_PATH, {});
+  const list = configData.exams || [];
+  return [...list].sort((a, b) => {
+    const dateA = Date.parse(a.date);
+    const dateB = Date.parse(b.date);
+    if (!isNaN(dateA) && !isNaN(dateB)) {
+      return dateA - dateB;
+    }
+    return a.id - b.id;
+  });
+}
+
+/**
+ * Adds a new exam schedule.
+ */
+async function addExam(course, date, time, venue) {
+  const configData = readJson(CONFIG_PATH, {});
+  if (!configData.exams) {
+    configData.exams = [];
+  }
+  const nextId = configData.exams.reduce((max, item) => Math.max(max, item.id || 0), 0) + 1;
+  const newItem = {
+    id: nextId,
+    course,
+    date,
+    time,
+    venue,
+    created_at: new Date().toISOString()
+  };
+  configData.exams.push(newItem);
+  writeJsonAtomic(CONFIG_PATH, configData);
+  return newItem;
+}
+
+/**
+ * Adds an announcement.
+ */
+async function addAnnouncement(senderJid, content) {
+  const configData = readJson(CONFIG_PATH, {});
+  if (!configData.announcements) {
+    configData.announcements = [];
+  }
+  const nextId = configData.announcements.reduce((max, item) => Math.max(max, item.id || 0), 0) + 1;
+  const newItem = {
+    id: nextId,
+    sender_jid: senderJid,
+    content,
+    created_at: new Date().toISOString()
+  };
+  configData.announcements.push(newItem);
+  writeJsonAtomic(CONFIG_PATH, configData);
+  return newItem;
+}
+
+/**
+ * Adds a schedule change record.
+ */
+async function addScheduleChange(day, course, originalTime, newTime) {
+  const configData = readJson(CONFIG_PATH, {});
+  if (!configData.schedule_changes) {
+    configData.schedule_changes = [];
+  }
+  const nextId = configData.schedule_changes.reduce((max, item) => Math.max(max, item.id || 0), 0) + 1;
+  const newItem = {
+    id: nextId,
+    day,
+    course,
+    original_time: originalTime,
+    new_time: newTime,
+    created_at: new Date().toISOString()
+  };
+  configData.schedule_changes.push(newItem);
+  writeJsonAtomic(CONFIG_PATH, configData);
+  return newItem;
 }
 
 module.exports = {
   init,
-  dbQueryRun,
-  dbQueryGet,
-  dbQueryAll,
-  dbInstance: db
+  getTimetable,
+  getAssignments,
+  addAssignment,
+  addAttendance,
+  getSettings,
+  saveSetting,
+  getAdmins,
+  getNotes,
+  addNote,
+  getExams,
+  addExam,
+  addAnnouncement,
+  addScheduleChange
 };

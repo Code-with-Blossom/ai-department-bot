@@ -30,10 +30,7 @@ module.exports = {
       
       try {
         // Log attendance checkin to SQLite table
-        await db.dbQueryRun(
-          'INSERT INTO attendance (user_jid, course, date, status) VALUES (?, ?, ?, ?)',
-          [senderJid, course, todayDate, 'present']
-        );
+        await db.addAttendance(senderJid, course, todayDate, 'present');
         
         await sock.sendMessage(remoteJid, {
           text: `📝 *Attendance Registered:* Student @${cleanSender} checked in as *PRESENT* for *${course.toUpperCase()}* on *${todayDate}* (Lagos Time).`
@@ -51,7 +48,7 @@ module.exports = {
     
     // Default attendance command info
     await sock.sendMessage(remoteJid, {
-      text: `📝 *AI Department Attendance System* 📝\n\nTo check in for a class today, send:\n\`/attendance checkin <Course Code>\` (e.g. \`/attendance checkin EED\`)\n\nLogs are saved dynamically in SQLite database.`
+      text: `📝 *AI Department Attendance System* 📝\n\nTo check in for a class today, send:\n\`/attendance checkin <Course Code>\` (e.g. \`/attendance checkin EED\`)\n\nLogs are saved dynamically in JSON files.`
     }, { quoted: msg });
   }
 };

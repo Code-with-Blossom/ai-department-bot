@@ -2,31 +2,23 @@
 
 A production-ready WhatsApp Business group assistant bot designed specifically for managing and broadcasting academic timetables, announcement delivery, and department student engagement. 
 
-All settings, timetable data, announcements, and classroom records are backed by a local **SQLite database** stored in `./data/ai_department.db`.
+All settings, timetable data, announcements, and classroom records are backed by local **JSON database files** stored in `./data/`.
 
 ---
 
-## 💾 SQLite Database Integration
+## 💾 JSON Database Integration
 
-The application has migrated from JSON file storage to SQLite using the `sqlite3` driver. The database file is located at `./data/ai_department.db`.
+The application uses local JSON files for persistent data storage. The files are located in the `./data` directory:
 
-### 📊 Table Schema Specifications
-The database automatically initializes the following tables upon boot:
+1.  **`timetable.json`**: Centralized weekly course timetable. Automatically seeded from the root `timetable.json` on the first run.
+2.  **`assignments.json`**: List of class assignments with deadlines, titles, and creation dates.
+3.  **`attendance.json`**: Lagos-timezone check-in history records mapping student JIDs to courses and dates.
+4.  **`config.json`**: Stores system settings (reminders paused, overrides), admin profiles, shared notes/links, exam schedules, official announcements history, and schedule override logs.
 
-1.  **`users`**: Student register with fields `id`, `jid` (unique), `name`, `role` (e.g. `'admin'`, `'student'`), and `created_at`.
-2.  **`notes`**: Slide slide/resource URLs shared with the class: `id`, `course`, `title`, `url`, `created_at`.
-3.  **`assignments`**: Deadline manager: `id`, `course`, `title`, `deadline`, `created_at`.
-4.  **`exams`**: Department exam roster: `id`, `course`, `date`, `time`, `venue`, `created_at`.
-5.  **`attendance`**: Log checks for lectures: `id`, `user_jid`, `course`, `date`, `status`, `created_at`.
-6.  **`announcements`**: History of broadcasted announcements: `id`, `sender_jid`, `content`, `created_at`.
-7.  **`schedule_changes`**: Timetable overrides history log: `id`, `day`, `course`, `original_time`, `new_time`, `created_at`.
-8.  **`timetable`**: Centralized weekly course timetable: `id`, `day`, `course`, `time`.
-9.  **`settings`**: Key-value settings repository replacing `config.json` (stores reminders status and overrides).
-
-### ⚙️ Automatic Data Migration (Seeding)
+### ⚙️ Automatic Data Seeding
 On the first run:
-- The bot detects if the `timetable` table is empty. If empty, it reads `timetable.json` and imports all classes automatically.
-- Seeding configuration settings (like `is_reminders_paused` and `thursday_class_time`) takes place automatically.
+- The bot detects if `data/timetable.json` is missing. If missing, it copies the default `timetable.json` from the root directory.
+- It initializes default values inside `data/config.json`, `data/assignments.json`, and `data/attendance.json` if they do not exist.
 
 ---
 
@@ -117,7 +109,7 @@ Scan the rendered QR Code printed on the terminal using WhatsApp **Linked Device
 ## 🌐 Cloud Deployment Guide
 
 ### 💾 Database Persistence (Critical)
-Because SQLite uses local file storage, containerized cloud environments (Render/Railway) will reset the database on restarts. 
+Because JSON database files use local file storage, containerized cloud environments (Render/Railway) will reset the database on restarts. 
 To prevent data loss:
 - **Mount a Persistent Disk/Volume** to the `./data` directory (Mount Path: `/app/data` if your root is `/app`).
 - Keep your `auth_info/` directory persisted on the volume as well to maintain WhatsApp session logins.
