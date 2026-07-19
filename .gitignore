@@ -5,3 +5,6 @@ auth/
 session/
 logs/
 *.log
+data/baileys_auth.json
+data/baileys_auth.json.tmp
+session_data.txt

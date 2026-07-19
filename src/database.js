@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { BufferJSON, initAuthCreds, proto } = require('@whiskeysockets/baileys');
 const logger = require('./logger');
 
 const DATA_DIR = path.join(__dirname, '../data');
@@ -7,6 +8,7 @@ const TIMETABLE_PATH = path.join(DATA_DIR, 'timetable.json');
 const ASSIGNMENTS_PATH = path.join(DATA_DIR, 'assignments.json');
 const ATTENDANCE_PATH = path.join(DATA_DIR, 'attendance.json');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+const AUTH_PATH = path.join(DATA_DIR, 'baileys_auth.json');
 
 // Ensure data folder exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -289,6 +291,96 @@ async function addScheduleChange(day, course, originalTime, newTime) {
   return newItem;
 }
 
+/**
+ * Returns a custom Baileys authentication state synced to a single JSON file.
+ * On Railway (or any cloud host), if SESSION_DATA env variable is set, it loads
+ * the session from there instead of the local file so it survives redeploys.
+ */
+async function getAuthState() {
+  let authData = {
+    creds: {},
+    keys: {}
+  };
+
+  // --- Cloud mode: load session from SESSION_DATA environment variable ---
+  if (process.env.SESSION_DATA) {
+    try {
+      const decoded = Buffer.from(process.env.SESSION_DATA, 'base64').toString('utf8');
+      authData = JSON.parse(decoded, BufferJSON.reviver);
+      logger.info('Loaded Baileys authentication state from SESSION_DATA environment variable.');
+    } catch (err) {
+      logger.error('Failed to parse SESSION_DATA env variable, starting fresh:', err);
+    }
+  // --- Local mode: load session from JSON file ---
+  } else if (fs.existsSync(AUTH_PATH)) {
+    try {
+      const fileContent = fs.readFileSync(AUTH_PATH, 'utf8');
+      authData = JSON.parse(fileContent, BufferJSON.reviver);
+      logger.info('Loaded Baileys authentication state from JSON database.');
+    } catch (err) {
+      logger.error('Failed to parse baileys_auth.json, starting fresh:', err);
+    }
+  } else {
+    logger.info('No existing Baileys authentication state found. Starting fresh session...');
+  }
+
+  if (!authData.creds || Object.keys(authData.creds).length === 0) {
+    authData.creds = initAuthCreds();
+  }
+
+  const saveState = () => {
+    logger.debug('Saving Baileys authentication state to JSON database...');
+    const tempPath = AUTH_PATH + '.tmp';
+    try {
+      fs.writeFileSync(tempPath, JSON.stringify(authData, BufferJSON.replacer, 2), 'utf8');
+      fs.renameSync(tempPath, AUTH_PATH);
+      logger.debug('Baileys authentication state successfully saved.');
+    } catch (err) {
+      logger.error('Failed to save authentication state atomically:', err);
+    }
+  };
+
+  return {
+    state: {
+      creds: authData.creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          ids.forEach((id) => {
+            let value = authData.keys[`${type}-${id}`];
+            if (type === 'app-state-sync-key' && value) {
+              value = proto.Message.AppStateSyncKeyData.fromObject(value);
+            }
+            data[id] = value;
+          });
+          return data;
+        },
+        set: async (data) => {
+          let updated = false;
+          for (const category in data) {
+            for (const id in data[category]) {
+              const value = data[category][id];
+              const key = `${category}-${id}`;
+              if (value) {
+                authData.keys[key] = value;
+              } else {
+                delete authData.keys[key];
+              }
+              updated = true;
+            }
+          }
+          if (updated) {
+            saveState();
+          }
+        }
+      }
+    },
+    saveCreds: async () => {
+      saveState();
+    }
+  };
+}
+
 module.exports = {
   init,
   getTimetable,
@@ -303,5 +395,6 @@ module.exports = {
   getExams,
   addExam,
   addAnnouncement,
-  addScheduleChange
+  addScheduleChange,
+  getAuthState
 };

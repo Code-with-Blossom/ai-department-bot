@@ -111,5 +111,4 @@ Scan the rendered QR Code printed on the terminal using WhatsApp **Linked Device
 ### 💾 Database Persistence (Critical)
 Because JSON database files use local file storage, containerized cloud environments (Render/Railway) will reset the database on restarts. 
 To prevent data loss:
-- **Mount a Persistent Disk/Volume** to the `./data` directory (Mount Path: `/app/data` if your root is `/app`).
-- Keep your `auth_info/` directory persisted on the volume as well to maintain WhatsApp session logins.
+- **Mount a Persistent Disk/Volume** to the `./data` directory (Mount Path: `/app/data` if your root is `/app`). Since all database tables and session credentials/keys (`data/baileys_auth.json`) are stored within the `./data` directory, mounting this single folder is sufficient to persist everything across redeploys and restarts.

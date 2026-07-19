@@ -130,8 +130,7 @@ async function handleMessage(sock, msg) {
   }
 
   if (command === 'test') {
-    await sock.sendMessage(remoteJid, { text: '✅ AI Department Assistant is online.' }, { quoted: msg });
-    return;
+    return handleTest(sock, remoteJid, msg);
   }
 
   if (command === 'today') {
@@ -144,6 +143,21 @@ async function handleMessage(sock, msg) {
 
   if (command === 'schedule') {
     return handleSchedule(sock, remoteJid, msg);
+  }
+
+  // /pdf with no course code → show library list
+  if (command === 'pdf' && args.length === 0) {
+    return pdfService.listPdfs(sock, remoteJid, msg);
+  }
+
+  if (command === 'add') {
+    if (args[0]?.toLowerCase() === 'pdf') {
+      return pdfService.handleAddPdf(sock, remoteJid, args.slice(1), msg);
+    }
+  }
+
+  if (command === 'addpdf') {
+    return pdfService.handleAddPdf(sock, remoteJid, args, msg);
   }
 
   // ----------------------------------------------------
@@ -203,7 +217,7 @@ async function handleMessage(sock, msg) {
       break;
     default:
       await sock.sendMessage(remoteJid, {
-        text: `❓ Unknown command: */${command}*\nType */help* to view available commands.`
+        text: `😂 *Ode, wrong command!* /${command} no exist.\nType */help* to see the correct commands.`
       }, { quoted: msg });
   }
 }
@@ -230,6 +244,11 @@ Here are the commands available:
 • */exams* - View exams calendar. Add: \`/exam add <course> | <date> | <time> | <venue>\`
 • */attendance checkin <code>* - Log checkin for active classes.
 
+*PDF Lecture Notes Library:*
+• */pdf* - Browse all available lecture notes in the library.
+• */pdf <course>* - Download a specific PDF note (e.g. \`/pdf AIT323\`).
+• */add pdf <course>* - Upload a PDF to the library (e.g. \`/add pdf AIT323\`).
+
 *Admin Commands:*
 • */announcement <text>* - Format and broadcast an announcement.
 • */cancel* - Toggle pause/resume on reminders.
@@ -252,6 +271,95 @@ async function sendGroupId(sock, remoteJid, msg) {
       text: `❌ This command can only be used inside a WhatsApp group.`
     }, { quoted: msg });
   }
+}
+
+/**
+ * /test command handler
+ * Responds to confirm the bot is online, then sends reminders for tomorrow and
+ * every remaining weekday in the current week to the configured group.
+ */
+async function handleTest(sock, remoteJid, msg) {
+  const cfg = config.get();
+  const timetable = await scheduler.loadTimetable();
+
+  // 1. Confirm bot is online (safe send — no quoted to avoid @lid JID issues)
+  try {
+    await sock.sendMessage(remoteJid, {
+      text: '✅ *AI Department Assistant is online and active!*\n\n📆 Sending class reminders for tomorrow and the rest of this week to the group now...'
+    }, { quoted: msg });
+  } catch (_) {
+    // Fallback: send without quoting (handles @lid JID format edge cases)
+    try {
+      await sock.sendMessage(remoteJid, {
+        text: '✅ *AI Department Assistant is online and active!*\n\n📆 Sending class reminders for tomorrow and the rest of this week to the group now...'
+      });
+    } catch (err) {
+      logger.error('/test: Failed to send confirmation message:', err);
+    }
+  }
+
+  // 2. Determine target group JID (use current chat if it's a group, else fall back to configured group)
+  const targetJid = remoteJid.endsWith('@g.us') ? remoteJid : cfg.groupJid;
+  if (!targetJid || targetJid === 'your_group_jid_here@g.us') {
+    logger.warn('/test: No valid group JID configured, skipping reminder sends.');
+    return;
+  }
+
+  // 3. Build list of remaining days from tomorrow through end of the week (Mon–Fri only)
+  const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const now = new Date();
+  const todayNum = now.getDay(); // 0=Sun ... 6=Sat
+
+  const weekdays = [1, 2, 3, 4, 5]; // Mon–Fri indices
+  const remainingWeekdays = weekdays.filter(d => d > todayNum);
+
+  if (remainingWeekdays.length === 0) {
+    logger.info('/test: No remaining weekdays this week. No reminders to send.');
+    try {
+      await sock.sendMessage(remoteJid, {
+        text: '📭 No more classes scheduled for the rest of this week.'
+      });
+    } catch (_) {}
+    return;
+  }
+
+  // 4. Send a reminder for each remaining weekday that has classes
+  let remindersSent = 0;
+  for (const dayNum of remainingWeekdays) {
+    const dayName = DAY_NAMES[dayNum];
+    const classes = timetable[dayName] || [];
+
+    if (classes.length === 0) continue;
+
+    // Build a daily summary message for this day
+    let msgText = `🔔 *UPCOMING CLASS REMINDER*\n\n`;
+    msgText += `📅 *${dayName}*\n\n`;
+    msgText += `📚 *Classes Scheduled:*\n\n`;
+
+    classes.forEach((item) => {
+      const displayTime =
+        item.time.toLowerCase().includes('scheduled')
+          ? cfg.thursdayClassTime
+          : item.time;
+      msgText += `• *${item.course}* — ${displayTime}`;
+      if (item.lecturer) msgText += ` _(${item.lecturer})_`;
+      msgText += `\n`;
+    });
+
+    msgText += `\n_Please prepare your materials and be punctual!_ 📖`;
+
+    try {
+      await sock.sendMessage(targetJid, { text: msgText });
+      remindersSent++;
+      logger.info(`/test: Sent reminder for ${dayName} to group ${targetJid}`);
+      // Small delay to avoid WhatsApp rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    } catch (err) {
+      logger.error(`/test: Failed to send reminder for ${dayName}:`, err);
+    }
+  }
+
+  logger.info(`/test: Done. Sent ${remindersSent} day reminder(s) for the rest of the week.`);
 }
 
 /**
@@ -317,7 +425,13 @@ async function handleToday(sock, remoteJid, msg) {
   });
 
   const timetable = await scheduler.loadTimetable();
-  const classes = timetable[todayName] || [];
+  const cfg = config.get();
+
+  // Resolve "As Scheduled" entries to the actual configured time
+  const classes = (timetable[todayName] || []).map((item) => ({
+    ...item,
+    time: item.time.toLowerCase().includes('scheduled') ? cfg.thursdayClassTime : item.time
+  }));
 
   const text = scheduler.formatDailyReminder(todayName, classes);
   await sock.sendMessage(remoteJid, { text }, { quoted: msg });
@@ -327,13 +441,14 @@ async function handleToday(sock, remoteJid, msg) {
  * /tomorrow command handler
  */
 async function handleTomorrow(sock, remoteJid, msg) {
-  const nowLagos = new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' }));
-  const tomorrowLagos = new Date(nowLagos);
-  tomorrowLagos.setDate(nowLagos.getDate() + 1);
-  
-  const tomorrowName = tomorrowLagos.toLocaleString('en-US', { weekday: 'long' });
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const tomorrowName = tomorrow.toLocaleString('en-US', {
+    timeZone: 'Africa/Lagos',
+    weekday: 'long'
+  });
   const timetable = await scheduler.loadTimetable();
   const classes = timetable[tomorrowName] || [];
+  const cfg = config.get();
 
   let text = `🤖 *AI Department Assistant*\n\n`;
   text += `📅 *Tomorrow is ${tomorrowName}.*\n\n`;
@@ -341,7 +456,14 @@ async function handleTomorrow(sock, remoteJid, msg) {
 
   if (classes && classes.length > 0) {
     classes.forEach((item) => {
-      text += `• *${item.course}:* ${item.time}\n`;
+      // Resolve "As Scheduled" to the actual configured Thursday time
+      const displayTime =
+        item.time.toLowerCase().includes('scheduled')
+          ? cfg.thursdayClassTime
+          : item.time;
+      text += `• *${item.course}* — ${displayTime}`;
+      if (item.lecturer) text += ` _(${item.lecturer})_`;
+      text += `\n`;
     });
   } else {
     text += `🎉 No classes scheduled for tomorrow! Enjoy your day off.\n`;
@@ -361,12 +483,21 @@ async function handleSchedule(sock, remoteJid, msg) {
 
   let scheduleText = `🤖 *AI Department Weekly Timetable* 🤖\n\n`;
 
+  const cfg = config.get();
+
   weekdays.forEach((day) => {
     scheduleText += `📅 *${day}*\n`;
     const classes = timetable[day] || [];
     if (classes.length > 0) {
       classes.forEach((item) => {
-        scheduleText += `• *${item.course}:* ${item.time}\n`;
+        // Resolve "As Scheduled" to the actual configured Thursday time
+        const displayTime =
+          item.time.toLowerCase().includes('scheduled')
+            ? cfg.thursdayClassTime
+            : item.time;
+        scheduleText += `• *${item.course}* — ${displayTime}`;
+        if (item.lecturer) scheduleText += ` _(${item.lecturer})_`;
+        scheduleText += `\n`;
       });
     } else {
       scheduleText += `• No classes scheduled\n`;

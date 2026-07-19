@@ -83,7 +83,7 @@ function getReminderTime(course, timeStr) {
 /**
  * Formats the single class reminder notification.
  */
-function formatClassReminder(dayName, course, timeRange) {
+function formatClassReminder(dayName, course, timeRange, lecturer) {
   const formattedDayName = dayName.charAt(0).toUpperCase() + dayName.slice(1).toLowerCase();
 
   let msgText = `🔔 *CLASS REMINDER*\n\n`;
@@ -91,8 +91,9 @@ function formatClassReminder(dayName, course, timeRange) {
   msgText += `⏰ *Your next class starts in 1 hour, If you like come late nah you sabi*\n\n\n`;
   msgText += `📚 *Course:* ${course}\n`;
   msgText += `🕒 *Time:* ${timeRange}\n`;
-  msgText += `📅 *Day:* ${formattedDayName}\n\n`;
-  msgText += `Please prepare your materials and be punctual.\n\n`;
+  msgText += `📅 *Day:* ${formattedDayName}\n`;
+  if (lecturer) msgText += `👤 *Lecturer:* ${lecturer}\n`;
+  msgText += `\nPlease prepare your materials and be punctual.\n\n`;
   msgText += `Have a productive class! 🤖`;
   return msgText;
 }
@@ -100,7 +101,7 @@ function formatClassReminder(dayName, course, timeRange) {
 /**
  * Broadcasts class reminder to configured WhatsApp group.
  */
-async function sendClassReminder(dayName, course, timeRange) {
+async function sendClassReminder(dayName, course, timeRange, lecturer) {
   const cfg = config.get();
 
   if (cfg.isRemindersPaused) {
@@ -119,7 +120,7 @@ async function sendClassReminder(dayName, course, timeRange) {
     return;
   }
 
-  const text = formatClassReminder(dayName, course, timeRange);
+  const text = formatClassReminder(dayName, course, timeRange, lecturer);
 
   try {
     logger.info(`Sending 1-hour class reminder for "${course}" (${timeRange}) to group JID: ${groupJid}`);
@@ -140,7 +141,9 @@ function formatDailyReminder(day, classes) {
 
   if (classes && classes.length > 0) {
     classes.forEach((item) => {
-      msgText += `• *${item.course}:* ${item.time}\n`;
+      msgText += `• *${item.course}* — ${item.time}`;
+      if (item.lecturer) msgText += ` _(${item.lecturer})_`;
+      msgText += `\n`;
     });
   } else {
     msgText += `🎉 No classes scheduled for today! Enjoy your day.\n`;
@@ -197,7 +200,7 @@ async function startSchedules(sock) {
       try {
         const job = cron.schedule(cronExpression, async () => {
           logger.info(`Cron trigger activated: 1-hour reminder for "${item.course}" (${timeRange})`);
-          await sendClassReminder(dayName, item.course, timeRange);
+          await sendClassReminder(dayName, item.course, timeRange, item.lecturer || '');
         }, {
           scheduled: true,
           timezone: timezone
