@@ -303,24 +303,36 @@ async function getAuthState() {
     keys: {}
   };
 
-  // --- Cloud mode: load session from SESSION_DATA environment variable ---
-  if (process.env.SESSION_DATA) {
+  // --- Cloud mode: load session from split SESSION_DATA environment variables ---
+  let combinedSessionData = '';
+  let partIndex = 1;
+  while (process.env[`SESSION_DATA_${partIndex}`]) {
+    combinedSessionData += process.env[`SESSION_DATA_${partIndex}`];
+    partIndex++;
+  }
+
+  // Fallback to single SESSION_DATA if it is set and fits within limits
+  if (!combinedSessionData && process.env.SESSION_DATA) {
+    combinedSessionData = process.env.SESSION_DATA;
+  }
+
+  if (combinedSessionData) {
     try {
-      const rawBuffer = Buffer.from(process.env.SESSION_DATA, 'base64');
+      const rawBuffer = Buffer.from(combinedSessionData, 'base64');
       let decoded;
       
       // Check for gzip magic bytes (0x1f 0x8b)
       if (rawBuffer.length > 2 && rawBuffer[0] === 0x1f && rawBuffer[1] === 0x8b) {
         decoded = zlib.gunzipSync(rawBuffer).toString('utf8');
-        logger.info('Loaded and decompressed Baileys authentication state from SESSION_DATA env variable.');
+        logger.info('Loaded and decompressed Baileys authentication state from split SESSION_DATA env variables.');
       } else {
         decoded = rawBuffer.toString('utf8');
-        logger.info('Loaded Baileys authentication state from SESSION_DATA environment variable.');
+        logger.info('Loaded Baileys authentication state from SESSION_DATA.');
       }
       
       authData = JSON.parse(decoded, BufferJSON.reviver);
     } catch (err) {
-      logger.error('Failed to parse SESSION_DATA env variable, starting fresh:', err);
+      logger.error('Failed to parse SESSION_DATA, starting fresh:', err);
     }
   // --- Local mode: load session from JSON file ---
   } else if (fs.existsSync(AUTH_PATH)) {
