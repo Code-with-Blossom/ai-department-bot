@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const { BufferJSON, initAuthCreds, proto } = require('@whiskeysockets/baileys');
 const logger = require('./logger');
 
@@ -305,9 +306,19 @@ async function getAuthState() {
   // --- Cloud mode: load session from SESSION_DATA environment variable ---
   if (process.env.SESSION_DATA) {
     try {
-      const decoded = Buffer.from(process.env.SESSION_DATA, 'base64').toString('utf8');
+      const rawBuffer = Buffer.from(process.env.SESSION_DATA, 'base64');
+      let decoded;
+      
+      // Check for gzip magic bytes (0x1f 0x8b)
+      if (rawBuffer.length > 2 && rawBuffer[0] === 0x1f && rawBuffer[1] === 0x8b) {
+        decoded = zlib.gunzipSync(rawBuffer).toString('utf8');
+        logger.info('Loaded and decompressed Baileys authentication state from SESSION_DATA env variable.');
+      } else {
+        decoded = rawBuffer.toString('utf8');
+        logger.info('Loaded Baileys authentication state from SESSION_DATA environment variable.');
+      }
+      
       authData = JSON.parse(decoded, BufferJSON.reviver);
-      logger.info('Loaded Baileys authentication state from SESSION_DATA environment variable.');
     } catch (err) {
       logger.error('Failed to parse SESSION_DATA env variable, starting fresh:', err);
     }

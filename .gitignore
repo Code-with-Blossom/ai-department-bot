@@ -8,3 +8,4 @@ logs/
 data/baileys_auth.json
 data/baileys_auth.json.tmp
 session_data.txt
+session_compressed.txt
