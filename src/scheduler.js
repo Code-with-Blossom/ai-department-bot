@@ -154,7 +154,8 @@ function formatDailyReminder(day, classes) {
 }
 
 /**
- * Schedules all class reminders based on timetable SQLite table rows.
+ * Schedules the daily class reminder summary based on the weekly timetable.
+ * Triggers once per day at 7:00 AM on weekdays (Monday - Friday).
  */
 async function startSchedules(sock) {
   if (sock) {
@@ -166,52 +167,63 @@ async function startSchedules(sock) {
 
   const cfg = config.get();
   const timezone = cfg.timezone || 'Africa/Lagos';
-  const timetable = await loadTimetable();
 
-  logger.info(`Initializing individual 1-hour class reminder schedulers (Timezone: ${timezone})...`);
+  logger.info(`Initializing daily summary class reminder scheduler at 07:00 AM (Timezone: ${timezone})...`);
 
-  for (const [dayName, classes] of Object.entries(timetable)) {
-    const dayNum = DAY_MAP[dayName.toLowerCase()];
-    if (dayNum === undefined) {
-      logger.warn(`Unknown day in timetable database: "${dayName}". Skipping scheduling.`);
-      continue;
-    }
+  // Cron: 0 7 * * 1-5 (At 07:00 AM, Monday through Friday)
+  const cronExpression = `0 7 * * 1-5`;
 
-    classes.forEach((item) => {
-      // Resolve class time (check for overrides if needed)
-      let timeRange = item.time;
-      if (timeRange.toLowerCase().includes('scheduled') || timeRange.toLowerCase() === 'as scheduled') {
-        const override = cfg.thursdayClassTime;
-        if (override) {
-          timeRange = override;
-        }
-      }
-
-      const reminderTime = getReminderTime(item.course, item.time);
-      if (!reminderTime) {
+  try {
+    const job = cron.schedule(cronExpression, async () => {
+      const todayName = new Date().toLocaleString('en-US', {
+        timeZone: timezone,
+        weekday: 'long'
+      });
+      
+      logger.info(`Daily cron trigger activated for ${todayName}`);
+      
+      const timetable = await loadTimetable();
+      const classes = timetable[todayName] || [];
+      
+      if (classes.length === 0) {
+        logger.info(`No classes scheduled for today (${todayName}). Skipping reminder.`);
         return;
       }
-
-      const { hour, minute } = reminderTime;
-
-      // Cron: minute hour * * dayNum
-      const cronExpression = `${minute} ${hour} * * ${dayNum}`;
-
-      try {
-        const job = cron.schedule(cronExpression, async () => {
-          logger.info(`Cron trigger activated: 1-hour reminder for "${item.course}" (${timeRange})`);
-          await sendClassReminder(dayName, item.course, timeRange, item.lecturer || '');
-        }, {
-          scheduled: true,
-          timezone: timezone
-        });
-
-        activeJobs.push(job);
-        logger.info(`Scheduled reminder for "${item.course}" (${timeRange}) on ${dayName} at ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')} (${cronExpression})`);
-      } catch (err) {
-        logger.error(`Failed to schedule cron job for "${item.course}" on ${dayName} at ${hour}:${minute}:`, err);
+      
+      if (cfg.isRemindersPaused) {
+        logger.info(`Skipped daily summary reminder for ${todayName}: Reminders are paused.`);
+        return;
       }
+      
+      const groupJid = cfg.groupJid;
+      if (!groupJid || groupJid === 'your_group_jid_here@g.us' || groupJid === '120363000000000000@g.us') {
+        logger.warn(`Skipped daily summary reminder for ${todayName}: Group JID is not configured in .env.`);
+        return;
+      }
+      
+      const resolvedClasses = classes.map((item) => ({
+        ...item,
+        time: item.time.toLowerCase().includes('scheduled') ? cfg.thursdayClassTime : item.time
+      }));
+      
+      const text = formatDailyReminder(todayName, resolvedClasses);
+      
+      try {
+        logger.info(`Sending daily summary class reminder for ${todayName} to group JID: ${groupJid}`);
+        await botSocket.sendMessage(groupJid, { text });
+        logger.info(`Daily summary reminder for ${todayName} sent successfully.`);
+      } catch (err) {
+        logger.error(`Error sending daily summary reminder for ${todayName}:`, err);
+      }
+    }, {
+      scheduled: true,
+      timezone: timezone
     });
+
+    activeJobs.push(job);
+    logger.info(`Scheduled daily reminder summary at 07:00 AM Monday-Friday (${cronExpression})`);
+  } catch (err) {
+    logger.error(`Failed to schedule daily summary cron job:`, err);
   }
 
   logger.info(`Class scheduling complete. Active cron jobs running: ${activeJobs.length}`);

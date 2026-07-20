@@ -613,17 +613,31 @@ async function handleRemind(sock, remoteJid, args, msg) {
   const formattedDayName = dayName.charAt(0).toUpperCase() + dayName.slice(1);
   const classes = timetable[formattedDayName] || [];
 
-  for (const item of classes) {
-    let timeRange = item.time;
-    if (timeRange.toLowerCase().includes('scheduled') || timeRange.toLowerCase() === 'as scheduled') {
-      timeRange = cfg.thursdayClassTime;
-    }
-    await scheduler.sendClassReminder(formattedDayName, item.course, timeRange);
+  if (classes.length === 0) {
+    await sock.sendMessage(remoteJid, {
+      text: `🎉 No classes scheduled for *${formattedDayName}*.`
+    }, { quoted: msg });
+    return;
   }
 
-  await sock.sendMessage(remoteJid, {
-    text: `✅ Manual reminders for all *${formattedDayName}* classes triggered successfully to group: ${targetJid}.`
-  }, { quoted: msg });
+  const resolvedClasses = classes.map((item) => ({
+    ...item,
+    time: item.time.toLowerCase().includes('scheduled') ? cfg.thursdayClassTime : item.time
+  }));
+
+  const text = scheduler.formatDailyReminder(formattedDayName, resolvedClasses);
+
+  try {
+    await sock.sendMessage(targetJid, { text });
+    await sock.sendMessage(remoteJid, {
+      text: `✅ Manual daily summary reminder for *${formattedDayName}* classes triggered successfully to group: ${targetJid}.`
+    }, { quoted: msg });
+  } catch (err) {
+    logger.error(`Failed to send manual daily summary reminder for ${formattedDayName}:`, err);
+    await sock.sendMessage(remoteJid, {
+      text: `❌ *Error:* Failed to send the reminder message to the group.`
+    }, { quoted: msg });
+  }
 }
 
 module.exports = {
