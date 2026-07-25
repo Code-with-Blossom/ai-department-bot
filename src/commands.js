@@ -15,6 +15,9 @@ const polls = require('./features/polls');
 const metadataCache = new Map();
 const CACHE_TTL = 1000 * 60 * 5; // 5 minutes cache
 
+// Cache to keep track of processed message IDs to prevent duplicate responses (e.g., during reconnect cycles)
+const processedMessages = new Set();
+
 /**
  * Normalizes WhatsApp JIDs by removing device IDs and ensuring correct suffix.
  */
@@ -95,8 +98,34 @@ function getMessageText(msg) {
 /**
  * Main command router and message handler.
  */
+const BOT_START_TIME_SEC = Math.floor(Date.now() / 1000) - 120; // Allow 2 min buffer before bot start time
+
 async function handleMessage(sock, msg) {
   if (msg.key.fromMe) return;
+
+  // 1. Ignore old offline sync messages sent long before bot startup
+  const rawTimestamp = msg.messageTimestamp;
+  const msgTime = typeof rawTimestamp === 'number'
+    ? rawTimestamp
+    : (rawTimestamp?.low || Math.floor(Date.now() / 1000));
+
+  if (msgTime && msgTime < BOT_START_TIME_SEC) {
+    return;
+  }
+
+  // 2. Prevent duplicate handling of the same message (e.g. during reconnect cycles)
+  const msgId = msg.key.id;
+  if (msgId && processedMessages.has(msgId)) {
+    return;
+  }
+  if (msgId) {
+    processedMessages.add(msgId);
+    if (processedMessages.size > 500) {
+      // Remove oldest message ID from cache to bound memory usage
+      const oldest = processedMessages.values().next().value;
+      processedMessages.delete(oldest);
+    }
+  }
 
   const remoteJid = msg.key.remoteJid;
   const senderJid = msg.key.participant || msg.participant || remoteJid;
@@ -105,6 +134,8 @@ async function handleMessage(sock, msg) {
 
   const text = getMessageText(msg);
   if (!text) return;
+
+
 
   // Intercept and handle PDF Library requests
   const isPdfHandled = await pdfService.handlePdfRequest(sock, remoteJid, text, msg);
@@ -168,7 +199,9 @@ async function handleMessage(sock, msg) {
   }
 
   if (command === 'attendance' || command === 'checkin') {
-    return attendance.handleCheckin(sock, remoteJid, args.join(' '), msg);
+    // When using the /checkin alias, prepend 'checkin' so the handler receives the full expected string
+    const attendanceArgs = command === 'checkin' ? `checkin ${args.join(' ')}` : args.join(' ');
+    return attendance.handleCheckin(sock, remoteJid, attendanceArgs, msg);
   }
 
   if (command === 'exams' || command === 'exam') {
@@ -188,19 +221,8 @@ async function handleMessage(sock, msg) {
   }
 
   // ----------------------------------------------------
-  // Admin Only Commands
+  // Admin Commands (accessible to all group members)
   // ----------------------------------------------------
-  const isSenderAdmin = await checkAdminPrivileges(sock, remoteJid, senderJid);
-  
-  if (command === 'announcement' || command === 'cancel' || command === 'change' || command === 'remind') {
-    if (!isSenderAdmin) {
-      await sock.sendMessage(remoteJid, {
-        text: `❌ *Access Denied:* Only group admins can use /${command}.`
-      }, { quoted: msg });
-      logger.warn(`Unauthorized admin command attempt /${command} by ${normalizeJid(senderJid)}`);
-      return;
-    }
-  }
 
   switch (command) {
     case 'announcement':

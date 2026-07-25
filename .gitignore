@@ -7,5 +7,7 @@ logs/
 *.log
 data/baileys_auth.json
 data/baileys_auth.json.tmp
+data/baileys_auth_backup.json
+data/baileys_auth_backup.json.tmp
 session_data.txt
 session_compressed.txt

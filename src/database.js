@@ -3,6 +3,7 @@ const path = require('path');
 const zlib = require('zlib');
 const { BufferJSON, initAuthCreds, proto } = require('@whiskeysockets/baileys');
 const logger = require('./logger');
+const sessionManager = require('./sessionManager');
 
 const DATA_DIR = path.join(__dirname, '../data');
 const TIMETABLE_PATH = path.join(DATA_DIR, 'timetable.json');
@@ -293,6 +294,46 @@ async function addScheduleChange(day, course, originalTime, newTime) {
 }
 
 /**
+ * Verifies a raw SESSION_DATA base64 string is structurally valid.
+ * Returns { valid: boolean, reason: string, creds: object|null }.
+ */
+function verifySessionData(sessionString) {
+  if (!sessionString || typeof sessionString !== 'string' || sessionString.trim() === '') {
+    return { valid: false, reason: 'SESSION_DATA string is empty or missing.', creds: null };
+  }
+
+  try {
+    const rawBuffer = Buffer.from(sessionString.trim(), 'base64');
+    if (rawBuffer.length < 10) {
+      return { valid: false, reason: 'Decoded buffer is too short — payload is corrupted or truncated.', creds: null };
+    }
+
+    let decoded;
+    if (rawBuffer[0] === 0x1f && rawBuffer[1] === 0x8b) {
+      decoded = zlib.gunzipSync(rawBuffer).toString('utf8');
+    } else {
+      decoded = rawBuffer.toString('utf8');
+    }
+
+    const parsed = JSON.parse(decoded, BufferJSON.reviver);
+
+    if (!parsed || typeof parsed !== 'object') {
+      return { valid: false, reason: 'Parsed SESSION_DATA is not a valid JSON object.', creds: null };
+    }
+    if (!parsed.creds || Object.keys(parsed.creds).length === 0) {
+      return { valid: false, reason: 'SESSION_DATA has no credentials (creds is empty).', creds: null };
+    }
+    if (!parsed.creds.me) {
+      return { valid: false, reason: 'SESSION_DATA credentials are unregistered (creds.me is undefined). Bot will generate a QR code if loaded.', creds: parsed.creds };
+    }
+
+    return { valid: true, reason: `Credentials registered for: ${parsed.creds.me.id}`, creds: parsed.creds };
+  } catch (err) {
+    return { valid: false, reason: `Failed to parse SESSION_DATA: ${err.message}`, creds: null };
+  }
+}
+
+/**
  * Returns a custom Baileys authentication state synced to a single JSON file.
  * On Railway (or any cloud host), if SESSION_DATA env variable is set, it loads
  * the session from there instead of the local file so it survives redeploys.
@@ -302,6 +343,11 @@ async function getAuthState() {
     creds: {},
     keys: {}
   };
+  let authSource = 'none';
+
+  logger.info('[AUTH] ─────────────────────────────────────────────────────────');
+  logger.info('[AUTH] Authentication State Initialization Started');
+  logger.info('[AUTH] ─────────────────────────────────────────────────────────');
 
   // --- Cloud mode: load session from split SESSION_DATA environment variables ---
   let combinedSessionData = '';
@@ -310,56 +356,117 @@ async function getAuthState() {
     combinedSessionData += process.env[`SESSION_DATA_${partIndex}`];
     partIndex++;
   }
+  if (partIndex > 1) {
+    logger.info(`[AUTH] Found split SESSION_DATA environment variable (${partIndex - 1} parts). Total length: ${combinedSessionData.length} chars.`);
+  }
 
   // Fallback to single SESSION_DATA if it is set and fits within limits
   if (!combinedSessionData && process.env.SESSION_DATA) {
     combinedSessionData = process.env.SESSION_DATA;
+    logger.info(`[AUTH] Found single SESSION_DATA environment variable. Length: ${combinedSessionData.length} chars.`);
+  }
+
+  if (!combinedSessionData) {
+    logger.warn('[AUTH] SESSION_DATA environment variable is NOT set.');
+    logger.warn('[AUTH] Falling back to local disk auth file...');
   }
 
   if (combinedSessionData) {
     try {
-      const rawBuffer = Buffer.from(combinedSessionData, 'base64');
+      const rawBuffer = Buffer.from(combinedSessionData.trim(), 'base64');
       let decoded;
-      
+
       // Check for gzip magic bytes (0x1f 0x8b)
       if (rawBuffer.length > 2 && rawBuffer[0] === 0x1f && rawBuffer[1] === 0x8b) {
         decoded = zlib.gunzipSync(rawBuffer).toString('utf8');
-        logger.info('Loaded and decompressed Baileys authentication state from split SESSION_DATA env variables.');
+        logger.info('[AUTH] Source: SESSION_DATA (gzip-compressed base64). Decompressed successfully.');
       } else {
         decoded = rawBuffer.toString('utf8');
-        logger.info('Loaded Baileys authentication state from SESSION_DATA.');
+        logger.info('[AUTH] Source: SESSION_DATA (plain base64).');
       }
-      
+
       authData = JSON.parse(decoded, BufferJSON.reviver);
+      authSource = 'SESSION_DATA';
+      logger.info('[AUTH] SESSION_DATA parsed successfully.');
+
+      // ── Persist to local disk immediately ──────────────────────────
+      // Railway and other cloud platforms use ephemeral filesystems.
+      // Writing SESSION_DATA to the local auth file right now ensures
+      // that saveCreds() (called by Baileys on every key update) writes
+      // incremental credential updates to a consistent path for the
+      // lifetime of this process, preventing key-sync loss mid-session.
+      try {
+        const tempPath = AUTH_PATH + '.tmp';
+        fs.writeFileSync(tempPath, decoded, 'utf8');
+        fs.renameSync(tempPath, AUTH_PATH);
+        logger.info('[AUTH] ✅ SESSION_DATA written to local disk as backup for this process lifetime.');
+      } catch (diskErr) {
+        // Non-fatal — in-memory state is still valid
+        logger.warn('[AUTH] ⚠️  Could not write SESSION_DATA to disk (read-only filesystem?). Running in memory-only mode. Error: ' + diskErr.message);
+      }
     } catch (err) {
-      logger.error('Failed to parse SESSION_DATA, starting fresh:', err);
+      logger.error('[AUTH] ❌ Failed to parse SESSION_DATA — falling back to local file. Error:', err.message);
     }
+
   // --- Local mode: load session from JSON file ---
   } else if (fs.existsSync(AUTH_PATH)) {
     try {
       const fileContent = fs.readFileSync(AUTH_PATH, 'utf8');
       authData = JSON.parse(fileContent, BufferJSON.reviver);
-      logger.info('Loaded Baileys authentication state from JSON database.');
+      authSource = 'local_file';
+      logger.info(`[AUTH] Source: Local file (${AUTH_PATH}). Loaded successfully.`);
     } catch (err) {
-      logger.error('Failed to parse baileys_auth.json, starting fresh:', err);
+      logger.error(`[AUTH] ❌ Failed to parse local auth file (${AUTH_PATH}). Starting fresh. Error:`, err.message);
     }
   } else {
-    logger.info('No existing Baileys authentication state found. Starting fresh session...');
+    authSource = 'fresh';
+    logger.warn('[AUTH] No existing auth file found on disk and no SESSION_DATA set.');
+    logger.warn('[AUTH] Starting a completely fresh (unregistered) session.');
   }
 
-  if (!authData.creds || Object.keys(authData.creds).length === 0) {
-    authData.creds = initAuthCreds();
+  // --- Diagnostic credential audit ---
+  const credsEmpty = !authData.creds || Object.keys(authData.creds).length === 0;
+  const credsRegistered = !credsEmpty && !!authData.creds.me;
+  const keysCount = authData.keys ? Object.keys(authData.keys).length : 0;
+
+  logger.info(`[AUTH] Source used:         ${authSource}`);
+  logger.info(`[AUTH] Credentials empty:   ${credsEmpty}`);
+  logger.info(`[AUTH] Credentials keys:    ${keysCount}`);
+
+  if (credsRegistered) {
+    logger.info(`[AUTH] ✅ Credentials are registered. Account ID: ${authData.creds.me.id}`);
+    logger.info('[AUTH] → Bot should reconnect WITHOUT generating a QR code.');
+  } else if (!credsEmpty && !credsRegistered) {
+    logger.warn('[AUTH] ⚠️  Credentials exist but are NOT registered (creds.me is undefined).');
+    logger.warn('[AUTH] → Baileys WILL generate a QR code on startup.');
+    logger.warn('[AUTH] → Reason: credentials were never paired with a WhatsApp account.');
+  } else {
+    logger.warn('[AUTH] ⚠️  No valid credentials found. Initializing fresh auth credentials.');
+    logger.warn('[AUTH] → Baileys WILL generate a QR code on startup.');
+    logger.warn('[AUTH] → Reason: no SESSION_DATA set and no local auth file exists.');
   }
+
+  if (credsEmpty) {
+    authData.creds = initAuthCreds();
+    logger.info('[AUTH] Fresh credentials initialized via initAuthCreds().');
+  }
+
+  logger.info('[AUTH] ─────────────────────────────────────────────────────────');
 
   const saveState = () => {
-    logger.debug('Saving Baileys authentication state to JSON database...');
+    logger.debug('[AUTH] saveCreds() triggered — saving updated authentication state to disk...');
     const tempPath = AUTH_PATH + '.tmp';
     try {
       fs.writeFileSync(tempPath, JSON.stringify(authData, BufferJSON.replacer, 2), 'utf8');
       fs.renameSync(tempPath, AUTH_PATH);
-      logger.debug('Baileys authentication state successfully saved.');
+      const registered = !!authData.creds.me;
+      if (registered) {
+        logger.debug(`[AUTH] ✅ Auth state saved. Account: ${authData.creds.me.id}`);
+      } else {
+        logger.debug('[AUTH] Auth state saved (session not yet registered — QR code scan still required).');
+      }
     } catch (err) {
-      logger.error('Failed to save authentication state atomically:', err);
+      logger.error('[AUTH] ❌ Failed to save authentication state atomically:', err.message);
     }
   };
 
@@ -404,6 +511,31 @@ async function getAuthState() {
   };
 }
 
+/**
+ * Exports active local authentication data into a compressed Base64 string for SESSION_DATA env.
+ */
+function exportSessionData() {
+  if (!fs.existsSync(AUTH_PATH)) {
+    console.error('❌ Error: No local auth file found at data/baileys_auth.json. Please run the bot locally and scan the QR code first.');
+    return;
+  }
+
+  try {
+    const rawContent = fs.readFileSync(AUTH_PATH, 'utf8');
+    const compressed = zlib.gzipSync(Buffer.from(rawContent, 'utf8'));
+    const base64Str = compressed.toString('base64');
+    
+    console.log('\n================================================================================');
+    console.log('🔑 PRODUCTION SESSION_DATA EXPORT SUCCESSFUL!');
+    console.log('================================================================================\n');
+    console.log('Copy the string below and paste it as SESSION_DATA in your Render/Railway Environment Variables:\n');
+    console.log(`SESSION_DATA=${base64Str}\n`);
+    console.log('================================================================================\n');
+  } catch (err) {
+    console.error('❌ Error exporting session data:', err);
+  }
+}
+
 module.exports = {
   init,
   getTimetable,
@@ -419,5 +551,7 @@ module.exports = {
   addExam,
   addAnnouncement,
   addScheduleChange,
-  getAuthState
+  getAuthState: sessionManager.getAuthState,
+  exportSessionData: sessionManager.exportSessionData,
+  verifySessionData: sessionManager.verifySessionData
 };

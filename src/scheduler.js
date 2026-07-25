@@ -168,7 +168,7 @@ async function startSchedules(sock) {
   const cfg = config.get();
   const timezone = cfg.timezone || 'Africa/Lagos';
 
-  logger.info(`Initializing daily summary class reminder scheduler at 07:00 AM (Timezone: ${timezone})...`);
+  logger.info(`Scheduler started (Timezone: ${timezone})...`);
 
   // Cron: 0 7 * * 1-5 (At 07:00 AM, Monday through Friday)
   const cronExpression = `0 7 * * 1-5`;
@@ -211,7 +211,7 @@ async function startSchedules(sock) {
       try {
         logger.info(`Sending daily summary class reminder for ${todayName} to group JID: ${groupJid}`);
         await botSocket.sendMessage(groupJid, { text });
-        logger.info(`Daily summary reminder for ${todayName} sent successfully.`);
+        logger.info(`Reminder sent successfully.`);
       } catch (err) {
         logger.error(`Error sending daily summary reminder for ${todayName}:`, err);
       }
@@ -221,7 +221,7 @@ async function startSchedules(sock) {
     });
 
     activeJobs.push(job);
-    logger.info(`Scheduled daily reminder summary at 07:00 AM Monday-Friday (${cronExpression})`);
+    logger.info(`Today's reminder scheduled at 07:00 AM Monday-Friday (${cronExpression})`);
   } catch (err) {
     logger.error(`Failed to schedule daily summary cron job:`, err);
   }

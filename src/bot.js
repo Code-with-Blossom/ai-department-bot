@@ -11,13 +11,20 @@ const config = require('./config');
 const commands = require('./commands');
 const scheduler = require('./scheduler');
 const database = require('./database');
+const sessionManager = require('./sessionManager');
 
 let sock = null;
+let activeSocket = null;
+let isConnecting = false;
+let reconnectTimer = null;
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 15;
+let isConnected = false;
+const MAX_RECONNECT_LOG_ATTEMPTS = 10;
 
-// Network error codes/messages that mean internet is temporarily down.
-// These should retry indefinitely rather than counting toward the exit limit.
+// Railway deployment environment detection
+const isRailway = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_GIT_COMMIT_SHA || process.env.PORT);
+
+// Network/socket error patterns for resilience
 const NETWORK_ERROR_PATTERNS = [
   'ENOTFOUND',
   'ECONNREFUSED',
@@ -27,180 +34,214 @@ const NETWORK_ERROR_PATTERNS = [
   'EHOSTUNREACH',
   'getaddrinfo',
   'Opening handshake has timed out',
-  'Connection was lost'
+  'Connection was lost',
+  'Stream Errored'
 ];
 
-/**
- * Returns true if the error is a temporary network/internet outage.
- * These errors should not count against the reconnect limit.
- */
-function isNetworkOutageError(errorMessage) {
-  if (!errorMessage) return false;
-  return NETWORK_ERROR_PATTERNS.some(pattern =>
-    errorMessage.toLowerCase().includes(pattern.toLowerCase())
-  );
-}
 let healthCheckServer = null;
 
-/**
- * Normalizes user/bot ID to clean JID format
- */
 function cleanJid(id) {
   if (!id) return '';
   return id.split(':')[0] + '@s.whatsapp.net';
 }
 
 /**
- * Connects to WhatsApp using Baileys multi-file authentication state.
+ * ConnectionManager handles WhatsApp Baileys socket lifecycle, single socket enforcement,
+ * automatic reconnects with exponential backoff, and state logging.
  */
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await database.getAuthState();
+  if (isConnecting) {
+    logger.warn('Connection attempt already in progress. Skipping duplicate call.');
+    return activeSocket;
+  }
 
-  logger.info('Initializing WhatsApp connection...');
+  isConnecting = true;
 
-  sock = makeWASocket({
-    logger: pino({ level: 'silent' }), // Suppress internal Baileys logger outputs to clean CLI
-    auth: state,
-    printQRInTerminal: false // We handle rendering QR manually to log it cleanly
-  });
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 
-  // Attach credential updater
-  sock.ev.on('creds.update', saveCreds);
-
-  // Connection events listener
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    // 1. Render QR Code if provided
-    if (qr) {
-      logger.info('New authentication QR Code generated! Scan it with WhatsApp Business / Multi-Device:');
-      qrcode.generate(qr, { small: true });
+  // Ensure strict single socket instance — close and detach previous active socket
+  if (activeSocket) {
+    try {
+      logger.info('Cleaning up existing WhatsApp socket instance...');
+      activeSocket.ev.removeAllListeners('connection.update');
+      activeSocket.ev.removeAllListeners('creds.update');
+      activeSocket.ev.removeAllListeners('messages.upsert');
+      activeSocket.end(new Error('Reconnecting new socket instance'));
+    } catch (e) {
+      logger.debug('Error closing active socket:', e.message);
     }
+    activeSocket = null;
+  }
 
-    // 2. Log connection states
-    if (connection === 'connecting') {
-      logger.info('Connecting to WhatsApp Web services...');
-    }
+  try {
+    const { state, saveCreds } = await sessionManager.getAuthState();
 
-    if (connection === 'open') {
-      reconnectAttempts = 0;
-      const botJid = cleanJid(sock.user.id);
-      logger.info(`WhatsApp connection successfully established! Logged in as: ${botJid}`);
+    logger.info('Connecting to WhatsApp...');
 
-      // List and print all joined groups
-      try {
-        const groups = await sock.groupFetchAllParticipating();
-        logger.info(`Fetching all joined WhatsApp groups (${Object.keys(groups).length} total):`);
-        for (const [jid, metadata] of Object.entries(groups)) {
-          logger.info(`👥 Group Name: "${metadata.subject}" | ID: ${jid}`);
-        }
-      } catch (err) {
-        logger.error('Failed to list joined groups:', err);
-      }
+    sock = makeWASocket({
+      logger: pino({ level: 'silent' }), // Suppress internal Baileys verbose logs
+      auth: state,
+      printQRInTerminal: false
+    });
 
+    activeSocket = sock;
 
-      // Initialize node-cron schedules
-      scheduler.initialize(sock);
-    }
+    // Attach credentials updater listener
+    sock.ev.on('creds.update', saveCreds);
 
-    // 3. Handle reconnection on connection close
-    if (connection === 'close') {
-      const error = lastDisconnect?.error;
-      let statusCode = null;
+    // Connection state update listener
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-      if (error) {
-        if (error instanceof Boom) {
-          statusCode = error.output.statusCode;
-        } else if (error.statusCode) {
-          statusCode = error.statusCode;
-        }
-      }
-
-      const errorMessage = error ? error.message : 'Unknown issue';
-      logger.warn(`WhatsApp connection closed. Message: "${errorMessage}" | Status Code: ${statusCode}`);
-
-      // Reconnect if not explicitly logged out
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-      if (shouldReconnect) {
-        // Check if this is just a temporary internet/network outage
-        const isNetworkError = isNetworkOutageError(errorMessage);
-
-        if (isNetworkError) {
-          // Network is down — do NOT count against the reconnect limit.
-          // Keep retrying every 60 seconds until internet comes back.
-          const delay = 60000;
-          logger.warn(`Network outage detected ("${errorMessage}"). Internet may be down. Retrying in 60 seconds... (attempt counter NOT incremented)`);
-          scheduler.stop();
-          setTimeout(connectToWhatsApp, delay);
+      // 1. QR Code generation
+      if (qr) {
+        logger.info('Waiting for QR Scan...');
+        if (!isRailway) {
+          qrcode.generate(qr, { small: true });
         } else {
-          // Real WhatsApp error — use exponential backoff and count attempts
-          reconnectAttempts++;
-          if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
-            // Exponential backoff with ceiling at 30 seconds
-            const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 30000);
-            logger.info(`Attempting reconnect #${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${(delay / 1000).toFixed(1)} seconds...`);
-
-            // Stop scheduler if running to prevent double execution or memory leaks during downtime
-            scheduler.stop();
-
-            setTimeout(connectToWhatsApp, delay);
-          } else {
-            logger.error(`Exceeded maximum reconnect attempts (${MAX_RECONNECT_ATTEMPTS}). Terminating process.`);
-            process.exit(1);
-          }
+          logger.info(`[Railway QR Raw Payload]: ${qr}`);
+          qrcode.generate(qr, { small: true });
         }
-      } else {
-        logger.error('Session logged out or expired. Automatically clearing "data/baileys_auth.json" to request a new QR Code.');
+      }
+
+      // 2. Connection open event
+      if (connection === 'open') {
+        isConnecting = false;
+        isConnected = true;
+        const previousAttempts = reconnectAttempts;
+        reconnectAttempts = 0;
+
+        const botJid = cleanJid(sock.user.id);
+        
+        if (previousAttempts > 0) {
+          logger.info('Connected successfully.');
+        } else {
+          logger.info(`Bot authenticated successfully.`);
+          logger.info(`Bot connected (${botJid})`);
+        }
+
+        // Auto-export SESSION_DATA string to logs for cloud deployment convenience
         try {
           const authPath = path.join(__dirname, '../data/baileys_auth.json');
           if (fs.existsSync(authPath)) {
-            fs.unlinkSync(authPath);
+            const rawContent = fs.readFileSync(authPath, 'utf8');
+            const compressed = require('zlib').gzipSync(Buffer.from(rawContent, 'utf8'));
+            const base64Str = compressed.toString('base64');
+            console.log(`\nSESSION_DATA=${base64Str}\n`);
           }
-        } catch (e) {
-          logger.error('Failed to automatically clear auth file:', e);
+        } catch (_) {}
+
+        // List joined groups
+        try {
+          const groups = await sock.groupFetchAllParticipating();
+          logger.info(`Fetching all joined WhatsApp groups (${Object.keys(groups).length} total):`);
+          for (const [jid, metadata] of Object.entries(groups)) {
+            logger.info(`👥 Group Name: "${metadata.subject}" | ID: ${jid}`);
+          }
+        } catch (err) {
+          logger.error('Failed to list joined groups:', err.message);
         }
-        reconnectAttempts = 0;
+
+        // Initialize cron scheduler
+        scheduler.initialize(sock);
+        logger.info('Ready.');
+      }
+
+      // 3. Connection close event & reconnection handling
+      if (connection === 'close') {
+        isConnecting = false;
+        isConnected = false;
+        const error = lastDisconnect?.error;
+        let statusCode = null;
+
+        if (error) {
+          if (error instanceof Boom) {
+            statusCode = error.output.statusCode;
+          } else if (error.statusCode) {
+            statusCode = error.statusCode;
+          }
+        }
+
+        const errorMessage = error ? error.message : 'Connection closed';
+        
         scheduler.stop();
-        setTimeout(connectToWhatsApp, 1000);
-      }
-    }
-  });
 
-  // Message event listener
-  sock.ev.on('messages.upsert', async ({ type, messages: list }) => {
-    if (type !== 'notify') return; // Ignore append/historical sync messages
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-    for (const msg of list) {
-      try {
-        await commands.handleMessage(sock, msg);
-      } catch (err) {
-        logger.error('Error handling incoming WhatsApp message event:', err);
+        if (!isLoggedOut) {
+          reconnectAttempts++;
+          const attemptNum = Math.min(reconnectAttempts, MAX_RECONNECT_LOG_ATTEMPTS);
+          logger.warn(`Lost connection. Attempt ${attemptNum}/${MAX_RECONNECT_LOG_ATTEMPTS}... (Reason: ${errorMessage})`);
+
+          // Exponential backoff capped at 60s
+          const delay = Math.min(1500 * Math.pow(1.5, Math.min(reconnectAttempts, 10)), 60000);
+          
+          reconnectTimer = setTimeout(() => {
+            connectToWhatsApp();
+          }, delay);
+        } else {
+          logger.error('Authentication failed. Session logged out or expired. Clearing local auth file to request new QR...');
+          try {
+            const authPath = path.join(__dirname, '../data/baileys_auth.json');
+            if (fs.existsSync(authPath)) {
+              fs.unlinkSync(authPath);
+            }
+          } catch (e) {
+            logger.error('Failed to remove auth file:', e.message);
+          }
+          reconnectAttempts = 0;
+          reconnectTimer = setTimeout(() => {
+            connectToWhatsApp();
+          }, 3000);
+        }
       }
-    }
-  });
+    });
+
+    // Message upsert handler
+    sock.ev.on('messages.upsert', async ({ type, messages: list }) => {
+      if (type !== 'notify') return;
+
+      for (const msg of list) {
+        try {
+          await commands.handleMessage(sock, msg);
+        } catch (err) {
+          logger.error('Error handling incoming WhatsApp message event:', err);
+        }
+      }
+    });
+
+  } catch (err) {
+    isConnecting = false;
+    isConnected = false;
+    logger.error('Exception during connectToWhatsApp():', err);
+    reconnectTimer = setTimeout(connectToWhatsApp, 10000);
+  }
 
   return sock;
 }
 
 /**
- * Launches a bare-minimum HTTP service for hosting environments (like Render or Railway)
- * that require binding to a PORT and passing dynamic health check calls.
+ * Health check server for Railway dynamic port binding.
  */
 function startHealthCheckServer() {
+  if (healthCheckServer) return;
+
   const port = process.env.PORT || 3000;
-  
+
   healthCheckServer = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/') {
       const cfg = config.get();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'online',
+        bot: isConnected ? 'online' : 'reconnecting',
         uptime_seconds: Math.round(process.uptime()),
-        timezone: cfg.timezone,
-        reminders_paused: cfg.isRemindersPaused,
-        configured_group: cfg.groupJid || 'NONE',
-        configured_admins_count: cfg.adminJids.length
+        connected: isConnected,
+        scheduler: cfg.isRemindersPaused ? 'paused' : 'active',
+        timestamp: new Date().toISOString()
       }));
     } else {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -208,34 +249,46 @@ function startHealthCheckServer() {
     }
   });
 
+  healthCheckServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      logger.warn(`Health check HTTP server port ${port} is already in use (EADDRINUSE). Continuing...`);
+    } else {
+      logger.error('Health check HTTP server error:', err);
+    }
+  });
+
   healthCheckServer.listen(port, () => {
-    logger.info(`Health check HTTP server is listening on port ${port}`);
+    logger.info(`Health Check HTTP server listening on port ${port}`);
   });
 }
 
 /**
- * Initializes and starts the entire bot stack.
+ * Starts the complete bot stack.
  */
 async function start() {
   try {
-    // 1. Initialize JSON Database
+    logger.info('Bot starting...');
+
+    // 1. Initialize Database
     await database.init();
 
-    // 2. Load settings from JSON database
+    // 2. Load Config from Database
     await config.load();
+    logger.info('Database loaded');
 
-    // 3. Bind HTTP server (crucial for Cloud hosts)
+    // 3. Start Health Server
     startHealthCheckServer();
 
-    // 4. Initiate WhatsApp socket
+    // 4. Connect to WhatsApp
     await connectToWhatsApp();
   } catch (err) {
-    logger.error('Fatal initialization exception caught:', err);
-    process.exit(1);
+    logger.error('Fatal bot startup error:', err);
+    setTimeout(start, 10000);
   }
 }
 
 module.exports = {
   start,
-  getSocket: () => sock
+  getSocket: () => sock,
+  isConnected: () => isConnected
 };

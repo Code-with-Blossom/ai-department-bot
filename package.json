@@ -6,6 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
+    "session:export": "node export-session.js",
+    "session:import": "node import-session.js --write",
+    "session:verify": "node import-session.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
